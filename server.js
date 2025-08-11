@@ -1,112 +1,89 @@
-// server.js
-import express from 'express';
-import cors from 'cors';
-import fetch from 'node-fetch';
-import { S3Client, HeadObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
+import express from "express";
+import cors from "cors";
+import fetch from "node-fetch";
+import { S3Client, GetObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import dotenv from "dotenv";
+
+dotenv.config();
 
 const app = express();
 app.use(cors());
 
-// ===== ENV VARS (set these in Render dashboard) =====
-const OMDB_API_KEY = process.env.OMDB_API_KEY; // Your OMDb API key
-const STORJ_ENDPOINT = process.env.STORJ_ENDPOINT; // e.g. https://gateway.storjshare.io
-const STORJ_ACCESS_KEY = process.env.STORJ_ACCESS_KEY;
-const STORJ_SECRET_KEY = process.env.STORJ_SECRET_KEY;
-const STORJ_BUCKET = process.env.STORJ_BUCKET; // e.g. pzp-posters
-const STORJ_PUBLIC_BASE = process.env.STORJ_PUBLIC_BASE; // e.g. https://link.storjshare.io/raw/<ACCESS>/<BUCKET>
-
-// ===== INIT S3 CLIENT =====
+const OMDB_API_KEY = process.env.OMDB_API_KEY; // your omdb key
+const BUCKET = process.env.STORJ_BUCKET;       // bucket name
+const REGION = "us-east-1";
 const s3 = new S3Client({
-  endpoint: STORJ_ENDPOINT,
-  region: 'us-east-1',
+  endpoint: process.env.STORJ_ENDPOINT,  // eg. https://gateway.storjshare.io
+  region: REGION,
   credentials: {
-    accessKeyId: STORJ_ACCESS_KEY,
-    secretAccessKey: STORJ_SECRET_KEY
+    accessKeyId: process.env.STORJ_ACCESS_KEY,
+    secretAccessKey: process.env.STORJ_SECRET_KEY
   }
 });
 
-// ===== FORMAT YEAR =====
-function formatYear(yearStr) {
-  if (!yearStr) return '';
-  if (yearStr.includes('–')) {
-    const [start, end] = yearStr.split('–').map(s => s.trim());
-    return end ? `${start}–${end}` : start;
-  }
-  return yearStr;
-}
-
-// ===== GET YEAR ONLY FROM OMDb =====
-async function getYearFromOMDb(imdbId) {
+async function storjFileExists(key) {
   try {
-    const res = await fetch(`https://www.omdbapi.com/?i=${imdbId}&apikey=${OMDB_API_KEY}`);
-    const data = await res.json();
-    if (data && data.Response !== 'False') {
-      return formatYear(data.Year || '');
-    }
-    return '';
-  } catch (err) {
-    console.error('Year fetch error:', err);
-    return '';
+    const cmd = new GetObjectCommand({ Bucket: BUCKET, Key: key });
+    await s3.send(cmd);
+    return true;
+  } catch {
+    return false;
   }
 }
 
-// ===== CACHE API =====
-app.get('/api/cache', async (req, res) => {
-  res.set('Access-Control-Allow-Origin', '*');
+async function getSignedPosterUrl(key) {
+  const cmd = new GetObjectCommand({ Bucket: BUCKET, Key: key });
+  return await getSignedUrl(s3, cmd, { expiresIn: 60 * 60 });
+}
 
+app.get("/api/cache", async (req, res) => {
   const imdbId = req.query.imdb;
-  if (!imdbId) return res.status(400).json({ error: 'imdb param required' });
-
-  const key = `posters/${imdbId}.jpg`;
+  if (!imdbId) return res.status(400).json({ error: "Missing imdb param" });
 
   try {
-    // ===== Check if exists in Storj =====
-    try {
-      await s3.send(new HeadObjectCommand({ Bucket: STORJ_BUCKET, Key: key }));
-      const year = await getYearFromOMDb(imdbId);
-      return res.json({
-        posterUrl: `${STORJ_PUBLIC_BASE}/${key}`,
-        year
-      });
-    } catch {
-      // ===== Not in bucket → fetch from OMDb =====
-      const omdbRes = await fetch(`https://www.omdbapi.com/?i=${imdbId}&apikey=${OMDB_API_KEY}`);
-      const data = await omdbRes.json();
+    const imgKey = `${imdbId}.jpg`;
+    const metaKey = `${imdbId}.json`;
 
-      if (!data || data.Response === 'False') {
-        return res.json({ posterUrl: null, year: '' });
-      }
+    const hasImage = await storjFileExists(imgKey);
+    const hasMeta = await storjFileExists(metaKey);
 
-      const year = formatYear(data.Year || '');
-      const posterSrc = (data.Poster && data.Poster !== 'N/A') ? data.Poster : null;
+    if (hasImage && hasMeta) {
+      const metaUrl = await getSignedPosterUrl(metaKey);
+      const metaResp = await fetch(metaUrl);
+      const meta = await metaResp.json();
 
-      if (!posterSrc) return res.json({ posterUrl: null, year });
-
-      const imgRes = await fetch(posterSrc);
-      if (!imgRes.ok) return res.json({ posterUrl: null, year });
-
-      const buffer = Buffer.from(await imgRes.arrayBuffer());
-
-      await s3.send(new PutObjectCommand({
-        Bucket: STORJ_BUCKET,
-        Key: key,
-        Body: buffer,
-        ContentType: imgRes.headers.get('content-type') || 'image/jpeg'
-      }));
-
-      return res.json({
-        posterUrl: `${STORJ_PUBLIC_BASE}/${key}`,
-        year
-      });
+      const posterUrl = await getSignedPosterUrl(imgKey);
+      return res.json({ posterUrl, year: meta.year });
     }
+
+    // fetch from OMDb
+    const omdbResp = await fetch(`https://www.omdbapi.com/?i=${imdbId}&apikey=${OMDB_API_KEY}`);
+    const data = await omdbResp.json();
+
+    if (data.Response === "False") {
+      return res.status(404).json({ error: "Movie not found in OMDb" });
+    }
+
+    const year = data.Year || "";
+    let posterUrl = null;
+
+    if (data.Poster && data.Poster !== "N/A") {
+      const posterResp = await fetch(data.Poster);
+      const posterBuffer = Buffer.from(await posterResp.arrayBuffer());
+      await s3.send(new PutObjectCommand({ Bucket: BUCKET, Key: imgKey, Body: posterBuffer, ContentType: "image/jpeg" }));
+      posterUrl = await getSignedPosterUrl(imgKey);
+    }
+
+    const meta = { year };
+    await s3.send(new PutObjectCommand({ Bucket: BUCKET, Key: metaKey, Body: JSON.stringify(meta), ContentType: "application/json" }));
+
+    return res.json({ posterUrl, year });
   } catch (err) {
     console.error(err);
-    return res.status(500).json({ error: err.message });
+    res.status(500).json({ error: "Server error" });
   }
 });
 
-// ===== START SERVER =====
 const port = process.env.PORT || 3000;
-app.listen(port, () => {
-  console.log(`API running at http://localhost:${port}`);
-});
+app.listen(port, () => console.log(`API running on ${port}`));
