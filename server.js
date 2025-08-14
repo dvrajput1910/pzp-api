@@ -84,6 +84,14 @@ app.get("/api/cache", async (req, res) => {
     res.status(500).json({ error: "Server error" });
   }
 });
+app.get("/gist", async (req, res) => {
+  const fetch = (await import("node-fetch")).default;
+  const gistUrl = "https://gist.githubusercontent.com/dvrajput1910/b98d127bfe384bdc0e3775f04e777ee7/raw/";
+  const resp = await fetch(gistUrl);
+  const text = await resp.text();
+  res.setHeader("Content-Type", "text/plain");
+  res.send(text);
+});
 
 const port = process.env.PORT || 3000;
 app.listen(port, () => console.log(`API running on ${port}`));
