@@ -8,7 +8,12 @@ import dotenv from "dotenv";
 dotenv.config();
 
 const app = express();
-app.use(cors());
+app.use(cors({
+    origin: '*', // Allow requests from any origin
+    methods: ['GET', 'POST'], // Allow specific HTTP methods
+    allowedHeaders: ['Content-Type'], // Allow specific headers
+    credentials: true // Allow sending cookies
+}));
 
 const OMDB_API_KEY = process.env.OMDB_API_KEY; // your omdb key
 const BUCKET = process.env.STORJ_BUCKET;       // bucket name
