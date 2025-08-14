@@ -9,10 +9,8 @@ dotenv.config();
 
 const app = express();
 app.use(cors({
-    origin: '*', // Allow requests from any origin
-    methods: ['GET', 'POST'], // Allow specific HTTP methods
-    allowedHeaders: ['Content-Type'], // Allow specific headers
-    credentials: true // Allow sending cookies
+  origin: true, // This will reflect the request origin
+  credentials: true
 }));
 
 const OMDB_API_KEY = process.env.OMDB_API_KEY; // your omdb key
